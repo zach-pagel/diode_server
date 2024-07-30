@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Chain.BlockCache do
   alias Chain.{Block, BlockCache}
@@ -276,6 +276,7 @@ defmodule Chain.BlockCache do
   defdelegate transactions(block), to: Block
   defdelegate transaction_status(block, transaction), to: Block
   defdelegate txhash(block), to: Block
+  defdelegate state_consistent?(block), to: Block
   defdelegate validate(block, fast), to: Block
   defdelegate ensure_state(block), to: Block
   defdelegate with_parent(block, fun), to: Block

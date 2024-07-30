@@ -1,11 +1,12 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Model.Sql do
   # Automatically defines child_spec/1
   use Supervisor
   # esqlite doesn't support :infinity
   @infinity 300_000_000
+  require Logger
 
   defp databases() do
     [
@@ -20,7 +21,6 @@ defmodule Model.Sql do
   defp map_mod(Chain.BlockCache), do: Db.Cache
   defp map_mod(Model.SyncSql), do: Db.Sync
   defp map_mod(Model.CredSql), do: Db.Creds
-  defp map_mod(Model.TicketSql), do: Db.Tickets
   defp map_mod(Model.KademliaSql), do: Db.Tickets
   defp map_mod(pid) when is_pid(pid), do: pid
   defp map_mod(_), do: Db.Default
@@ -45,10 +45,19 @@ defmodule Model.Sql do
 
     @impl true
     def init(_args) do
-      Model.ChainSql.init()
-      Model.StateSql.init()
-      Model.TicketSql.init()
-      Model.KademliaSql.init()
+      try do
+        Model.ChainSql.init()
+        Model.StateSql.init()
+        Model.KademliaSql.init()
+      catch
+        type, other ->
+          Logger.error(
+            "#{__MODULE__}.init failed: #{inspect({type, other})} at: #{inspect(__STACKTRACE__)}"
+          )
+
+          Kernel.reraise(other, __STACKTRACE__)
+      end
+
       {:ok, :done}
     end
   end

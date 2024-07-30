@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Model.Ets do
   def init(name, extra \\ []) do
@@ -18,9 +18,8 @@ defmodule Model.Ets do
     :ets.delete(name, idx)
   end
 
-  def all(name) do
+  def to_list(name) do
     :ets.tab2list(name)
-    |> Enum.map(fn {_key, value} -> value end)
   end
 
   def keys(name) do

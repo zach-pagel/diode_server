@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule RpcTest do
   use ExUnit.Case, async: false
@@ -11,6 +11,29 @@ defmodule RpcTest do
 
   setup_all do
     TestHelper.reset()
+  end
+
+  test "dio_edgev2" do
+    Worker.set_mode(:poll)
+    Worker.work()
+    Worker.work()
+    Worker.work()
+    Worker.work()
+    Worker.work()
+
+    request = ["getblockpeak"] |> Rlp.encode!() |> Base16.encode()
+    {200, %{"result" => ret}} = rpc("dio_edgev2", [request])
+    ["response", blockpeak] = Base16.decode(ret) |> Rlp.decode!()
+
+    request = ["getblockquick", blockpeak, 5] |> Rlp.encode!() |> Base16.encode()
+    {200, %{"result" => ret}} = rpc("dio_edgev2", [request])
+    ["response", blocks] = Base16.decode(ret) |> Rlp.decode!()
+    assert length(blocks) == 2
+
+    for block <- blocks do
+      assert [_block, pubkey] = block
+      assert pubkey == Diode.miner() |> Wallet.pubkey!()
+    end
   end
 
   test "trace_replayBlockTransactions" do

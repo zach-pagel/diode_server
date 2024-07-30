@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Network.PeerHandler do
   use Network.Handler
@@ -33,16 +33,16 @@ defmodule Network.PeerHandler do
   def do_init(state) do
     send_hello(
       Map.merge(state, %{
-        calls: :queue.new(),
         blocks: nil,
-        random_blocks: 0,
-        stable: false,
-        msg_count: 0,
-        start_time: System.os_time(:second),
-        server: nil,
+        calls: :queue.new(),
         job: nil,
         last_publish: nil,
-        last_send: nil
+        last_send: nil,
+        msg_count: 0,
+        random_blocks: 0,
+        server: nil,
+        stable: false,
+        start_time: System.os_time(:second)
       })
     )
   end
@@ -445,6 +445,7 @@ defmodule Network.PeerHandler do
           Process.register(self(), :active_sync_job)
           count = Model.SyncSql.count(state.blocks)
           validate_fast? = count > 100
+          log(state, "Importing #{count} blocks fastmode=#{validate_fast?}")
 
           ret =
             Stream.concat([block], Model.SyncSql.resolve(state.blocks))

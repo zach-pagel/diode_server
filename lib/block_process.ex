@@ -12,6 +12,8 @@ defmodule BlockProcess do
     defstruct [:hash, :timeout]
 
     def init(hash) when is_binary(hash) do
+      Process.flag(:priority, :high)
+
       block =
         Stats.tc(:sql_block_by_hash, fn ->
           Model.ChainSql.block_by_hash(hash)
@@ -19,14 +21,14 @@ defmodule BlockProcess do
 
       # IO.puts("block: #{Block.number(block)}")
 
-      %Worker{hash: hash, timeout: 10_000}
+      %Worker{hash: hash, timeout: 100_000}
       |> do_init(block)
       |> work()
     end
 
     def init(%Block{} = block) do
       state =
-        %Worker{hash: Block.hash(block), timeout: 60_000}
+        %Worker{hash: Block.hash(block), timeout: 600_000}
         |> do_init(block)
 
       # Prefetching the (normalized) state tree makes sense for serving all API requests
@@ -71,7 +73,6 @@ defmodule BlockProcess do
     def with_block(block_hash, fun) do
       key = {__MODULE__, :block, block_hash}
 
-      # IO.inspect(Profiler.stacktrace())
       case Process.get(key, nil) do
         nil ->
           block =
@@ -100,80 +101,59 @@ defmodule BlockProcess do
       end
     end
 
-    defp work(state = %Worker{hash: hash, timeout: timeout}) do
+    defp work(state = %Worker{hash: hash, timeout: _timeout}) do
       receive do
         # IO.puts("stopped worker #{Block.number(block)}")
         {:do_work, _block_hash, fun, from = {pid, _tag}} ->
-          Process.link(pid)
           block = block()
 
-          ret =
-            try do
-              me = self()
-              watcher = spawn_link(fn -> watch(me) end)
-              ret = fun.(block)
-              send(watcher, :stop)
-              {:ok, ret}
-            rescue
-              e -> {:error, e, __STACKTRACE__}
-            end
+          if Process.alive?(pid) do
+            me = self()
+            watcher = spawn_link(fn -> watch(me) end)
+            Process.link(pid)
 
-          case block do
-            nil ->
-              GenServer.reply(from, ret)
-              Process.unlink(pid)
+            ret =
+              try do
+                {:ok, :timer.tc(fn -> fun.(block) end)}
+              rescue
+                e -> {:error, e, __STACKTRACE__}
+              end
 
-            _block ->
-              # Order is important we want to ensure the ready signal
-              # arrives at the BlockProcess before the next `get_worker` call
-              GenServer.cast(
-                BlockProcess,
-                {:i_am_ready, hash, Process.info(self(), :total_heap_size), self()}
-              )
+            send(watcher, :stop)
+            GenServer.reply(from, ret)
+            Process.unlink(pid)
+          end
 
-              GenServer.reply(from, ret)
-              Process.unlink(pid)
-              work(state)
+          if block != nil do
+            GenServer.cast(
+              BlockProcess,
+              {:i_am_ready, hash, Process.info(self(), :total_heap_size), self()}
+            )
+
+            work(state)
           end
 
         :stop ->
           # IO.puts("stopping block: #{Block.number(block)}")
           :ok
-      after
-        timeout ->
-          nr = Chain.blocknumber(hash)
-          peak = Chain.peak()
-
-          cond do
-            # keep the top 10 blocks always online...
-            BlockProcess.has_cache() and nr > peak - 10 ->
-              work(state)
-
-            not GenServer.call(BlockProcess, {:can_i_stop?, hash, self()}, :infinity) ->
-              work(state)
-
-            true ->
-              # IO.puts("stopping block: #{Chain.blocknumber(hash)} peak: #{Chain.peak()}")
-              :ok
-          end
       end
     end
   end
 
   use GenServer
-  defstruct [:ready, :busy, :waiting, :mons, :queue, :queue_limit]
+  defstruct [:ready, :busy, :waiting, :queue, :queue_limit, :req]
 
-  @queue_limit_max 100
+  @queue_limit_max 300
   def start_link() do
     GenServer.start_link(
       __MODULE__,
       %BlockProcess{
         ready: %{},
-        mons: %{},
         queue: :queue.new(),
-        waiting: %{},
-        busy: %{},
-        queue_limit: @queue_limit_max
+        waiting: :queue.new(),
+        busy: MapSet.new(),
+        queue_limit: @queue_limit_max,
+        req: 0
       },
       name: __MODULE__
     )
@@ -185,73 +165,65 @@ defmodule BlockProcess do
   end
 
   @impl true
-  def handle_call({:with_worker, block_hash, fun}, from, state = %BlockProcess{waiting: waiting}) do
-    state = %BlockProcess{state | waiting: map_add_value(waiting, block_hash, {from, fun})}
-    {:noreply, pop_waiting(state, block_hash)}
-  end
-
   def handle_call(
-        {:can_i_stop?, block_hash, pid},
+        {:with_worker, block_hash, fun},
         from,
-        state = %BlockProcess{ready: ready, queue: queue, waiting: waiting}
+        state = %BlockProcess{waiting: waiting, queue: queue, queue_limit: queue_limit, req: req}
       ) do
-    if pid in map_get(ready, block_hash) do
-      if map_get(waiting, block_hash) == [] do
-        queue = queue_delete(queue, pid)
-        ready = map_delete_value(ready, block_hash, pid)
-        {:reply, true, %BlockProcess{state | ready: ready, queue: queue}}
-      else
-        GenServer.reply(from, false)
-        {:noreply, set_worker_mode(state, pid, block_hash, :ready) |> pop_waiting(block_hash)}
-      end
-    else
-      {:reply, false, state}
+    state = %BlockProcess{state | req: req + 1}
+
+    if div(req, 100) == 0 and :queue.len(waiting) > 2 * max_busy(state) do
+      Debouncer.immediate({__MODULE__, :queue_full}, fn ->
+        Logger.warning(
+          "BlockProcess queue is full: #{:queue.len(waiting)}/#{max_busy(state)} queue: #{:queue.len(queue)}/#{queue_limit}"
+        )
+      end)
     end
+
+    # Giving the Chain process high priority treatment
+    {pid, _tag} = from
+
+    state =
+      if pid in [Process.whereis(Chain)] do
+        %BlockProcess{state | waiting: :queue.in_r({from, fun, block_hash}, waiting)}
+      else
+        %BlockProcess{state | waiting: :queue.in({from, fun, block_hash}, waiting)}
+      end
+
+    {:noreply, pop_waiting(state)}
   end
 
   @impl true
   def handle_cast(
         {:add_worker, block_pid, block_hash},
-        state = %BlockProcess{mons: mons}
+        state = %BlockProcess{}
       ) do
-    state =
-      %BlockProcess{state | mons: Map.put(mons, Process.monitor(block_pid), block_hash)}
-      |> set_worker_mode(block_pid, block_hash, :ready)
-
-    {:noreply, state}
+    Process.monitor(block_pid)
+    {:noreply, set_worker_mode(state, block_pid, block_hash, :ready)}
   end
 
   def handle_cast({:i_am_ready, block_hash, {:total_heap_size, size}, pid}, state) do
     {:noreply,
-     update_queue_size(state, size * :memsup.get_os_wordsize())
+     update_queue_size(state, size * get_os_wordsize())
      |> set_worker_mode(pid, block_hash, :ready)
-     |> pop_waiting(block_hash)}
+     |> pop_waiting()}
   end
 
   def handle_cast({:i_am_ready, block_hash, nil, pid}, state) do
     {:noreply,
      state
      |> set_worker_mode(pid, block_hash, :ready)
-     |> pop_waiting(block_hash)}
+     |> pop_waiting()}
   end
 
   @impl true
-  def handle_info(
-        {:DOWN, ref, :process, remove_pid, reason},
-        state = %BlockProcess{mons: mons}
-      ) do
-    remove_hash = Map.get(mons, ref)
-    mons = Map.delete(mons, ref)
-
-    state =
-      %BlockProcess{state | mons: mons}
-      |> set_worker_mode(remove_pid, remove_hash, :gone)
-
+  def handle_info({:DOWN, _ref, :process, remove_pid, reason}, state) do
     if reason != :normal do
-      Logger.warning("block_proxy #{Base16.encode(remove_hash)} crashed for #{inspect(reason)}")
+      Logger.warning("block_proxy #{inspect(remove_pid)} crashed for #{inspect(reason)}")
     end
 
-    {:noreply, pop_waiting(state, remove_hash)}
+    state = set_worker_mode(state, remove_pid, :unknown, :gone)
+    {:noreply, pop_waiting(state)}
   end
 
   defp update_queue_size(
@@ -334,7 +306,7 @@ defmodule BlockProcess do
     with_block(block_ref, fn block -> fun.(Block.state(block)) end)
   end
 
-  def with_block(block_ref, fun, timeout \\ 120_000)
+  def with_block(block_ref, fun, timeout \\ 12_000)
 
   def with_block(<<block_hash::binary-size(32)>>, fun, timeout) do
     cond do
@@ -376,8 +348,17 @@ defmodule BlockProcess do
 
   defp do_with_worker(block_hash, fun, timeout) do
     case GenServer.call(__MODULE__, {:with_worker, block_hash, fun}, timeout) do
-      {:ok, ret} -> ret
-      {:error, error, trace} -> Kernel.reraise(error, trace)
+      {:ok, {time, ret}} ->
+        if time > 1_000_000 do
+          Logger.warning(
+            "BlockProcess took #{div(time, 1000)}ms for #{inspect(Profiler.stacktrace())}"
+          )
+        end
+
+        ret
+
+      {:error, error, trace} ->
+        Kernel.reraise(error, trace)
     end
   end
 
@@ -408,64 +389,72 @@ defmodule BlockProcess do
   end
 
   def set_worker_mode(
-        state = %BlockProcess{busy: busy, ready: ready, queue: queue, mons: mons},
+        state = %BlockProcess{busy: busy, ready: ready, queue: queue},
         pid,
         block_hash,
         mode
       ) do
     case mode do
       :busy ->
-        busy = map_add_value(busy, block_hash, pid)
+        busy = MapSet.put(busy, pid)
         ready = map_delete_value(ready, block_hash, pid)
         queue = queue_delete(queue, pid)
         %BlockProcess{state | ready: ready, queue: queue, busy: busy}
 
       :ready ->
         ready = map_add_value(ready, block_hash, pid)
-        busy = map_delete_value(busy, block_hash, pid)
+        busy = MapSet.delete(busy, pid)
         queue_add(%BlockProcess{state | ready: ready, busy: busy}, pid, block_hash)
 
       :gone ->
-        ready = map_delete_value(ready, block_hash, pid)
-        busy = map_delete_value(busy, block_hash, pid)
+        ready =
+          Enum.map(ready, fn {hash, pids} -> {hash, List.delete(pids, pid)} end) |> Map.new()
+
+        busy = MapSet.delete(busy, pid)
         queue = queue_delete(queue, pid)
 
-        %BlockProcess{state | ready: ready, queue: queue, busy: busy, mons: mons}
+        %BlockProcess{state | ready: ready, queue: queue, busy: busy}
     end
   end
 
-  def pop_waiting(
-        oldstate = %BlockProcess{waiting: waiting, ready: ready, busy: busy},
-        block_hash
-      ) do
-    with [{from, fun} | block_waits] <- map_get(waiting, block_hash) do
-      state = %BlockProcess{oldstate | waiting: map_put(waiting, block_hash, block_waits)}
+  def max_busy(%BlockProcess{queue_limit: queue_limit}) do
+    min(queue_limit - 1, System.schedulers_online() * 2)
+  end
 
-      case {map_get(ready, block_hash), map_get(busy, block_hash)} do
-        {[], []} ->
+  def pop_waiting(oldstate = %BlockProcess{waiting: waiting, ready: ready, busy: busy}) do
+    with true <- MapSet.size(busy) < max_busy(oldstate),
+         {{:value, {from, fun, block_hash}}, waiting} <- :queue.out(waiting) do
+      state = %BlockProcess{oldstate | waiting: waiting}
+
+      case map_get(ready, block_hash) do
+        [] ->
           assign_new_worker(state, block_hash, fun, from)
 
-        {[], busy_blocks} ->
-          if length(block_waits) > length(busy_blocks) do
-            assign_new_worker(state, block_hash, fun, from)
-          else
-            oldstate
-          end
-
-        {[pid | _rest], _} ->
+        [pid | _rest] ->
           send(pid, {:do_work, block_hash, fun, from})
           set_worker_mode(state, pid, block_hash, :busy)
       end
     else
-      _ -> oldstate
+      _ ->
+        oldstate
     end
   end
 
-  def assign_new_worker(state = %BlockProcess{mons: mons}, block_hash, fun, from) do
-    {pid, mon} = spawn_monitor(fn -> Worker.init(block_hash) end)
+  def assign_new_worker(state, block_hash, fun, from) do
+    {pid, _mon} = spawn_monitor(fn -> Worker.init(block_hash) end)
     send(pid, {:do_work, block_hash, fun, from})
+    set_worker_mode(state, pid, block_hash, :busy)
+  end
 
-    %BlockProcess{state | mons: Map.put(mons, mon, block_hash)}
-    |> set_worker_mode(pid, block_hash, :busy)
+  defp get_os_wordsize() do
+    case :persistent_term.get(:os_wordsize, nil) do
+      nil ->
+        wordsize = :memsup.get_os_wordsize()
+        :persistent_term.put(:os_wordsize, wordsize)
+        wordsize
+
+      wordsize ->
+        wordsize
+    end
   end
 end

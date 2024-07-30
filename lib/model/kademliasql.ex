@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Model.KademliaSql do
   alias Model.Sql
@@ -37,9 +37,9 @@ defmodule Model.KademliaSql do
   end
 
   def maybe_update_object(key, object) when is_tuple(object) do
-    hkey = Kademlia.hash(Object.key(object))
     # Checking that we got a valid object
-    if key == nil or key == hkey do
+    with hkey when hkey != nil <- Object.key_hash(object),
+         true <- key == nil or key == hkey do
       case object(hkey) do
         nil ->
           put_object(hkey, Object.encode!(object))
@@ -52,8 +52,6 @@ defmodule Model.KademliaSql do
           end
       end
     end
-
-    hkey
   end
 
   def put_object(key, object) do
@@ -96,10 +94,9 @@ defmodule Model.KademliaSql do
       # After a chain fork some signatures might have become invalid
       hash =
         Object.decode!(value)
-        |> Object.key()
-        |> Kademlia.hash()
+        |> Object.key_hash()
 
-      if key != hash do
+      if hash == nil or key != hash do
         query!("DELETE FROM p2p_objects WHERE key = ?1", bind: [key])
         false
       else

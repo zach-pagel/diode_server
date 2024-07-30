@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule MapMerkleTree do
   # ========================================================
@@ -21,11 +21,11 @@ defmodule MapMerkleTree do
   end
 
   def merkle(tree) do
-    MerkleTree.copy(tree, MerkleTree2)
+    MerkleCache.merkle(tree)
   end
 
   def root_hash(tree) do
-    MerkleTree.root_hash(merkle(tree))
+    MerkleCache.root_hash(tree)
   end
 
   def root_hashes(tree) do

@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule MerkleTree do
   @type key_type :: binary() | integer()
@@ -23,6 +23,10 @@ defmodule MerkleTree do
     copy(merkle, mod)
   end
 
+  def copy(merkle = {mod, _, _}, mod) do
+    merkle
+  end
+
   def copy(merkle, mod) do
     insert_items(mod.new(), to_list(merkle))
   end
@@ -41,6 +45,23 @@ defmodule MerkleTree do
 
     Enum.reduce(b_diff, a_diffmap, fn {key, value}, set ->
       Map.update(set, key, {nil, value}, fn {other, nil} -> {other, value} end)
+    end)
+  end
+
+  def difference2(a, b) do
+    a = to_list(a) |> Map.new()
+    b = to_list(b) |> Map.new()
+    keys = MapSet.union(MapSet.new(Map.keys(a)), MapSet.new(Map.keys(b)))
+
+    Enum.reduce(keys, %{}, fn key, set ->
+      a_value = Map.get(a, key)
+      b_value = Map.get(b, key)
+
+      if a_value != b_value do
+        Map.put(set, key, {a_value, b_value})
+      else
+        set
+      end
     end)
   end
 

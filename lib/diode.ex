@@ -1,33 +1,15 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 require Logger
 
 defmodule Diode do
   use Application
 
-  # Ignoring all info level sasl messages
-  def filter_function(event, _) do
-    case event do
-      %{level: :info, meta: %{domain: [:otp, :sasl]}} -> :stop
-      _other -> :ignore
-    end
-  end
-
   def start(_type, args) do
     :persistent_term.put(:env, Mix.env())
     :erlang.system_flag(:backtrace_depth, 30)
-    :logger.add_primary_filter(:ignore_supervisor_infos, {&filter_function/2, []})
-
     set_chaindefinition()
-
-    if travis_mode?() do
-      puts("++++++ TRAVIS DETECTED ++++++")
-      puts("~0p~n", [:inet.getifaddrs()])
-      puts("~0p~n", [:inet.get_rc()])
-      puts("~0p~n", [:inet.getaddr('localhost', :inet)])
-      puts("~0p~n", [:inet.gethostname()])
-    end
 
     puts("====== ENV #{Mix.env()} ======")
     puts("Build       : #{version()}")
@@ -35,7 +17,7 @@ defmodule Diode do
     puts("Peer    Port: #{peer_port()}")
     puts("RPC     Port: #{rpc_port()}")
 
-    if ssl?() do
+    if ssl?() and NodeAgent.available?() do
       puts("RPC SSL Port: #{rpcs_port()}")
     else
       puts("RPC SSL Port: DISABLED")
@@ -79,20 +61,30 @@ defmodule Diode do
         []
       end
 
+    {:ok, cache} = DetsPlus.open_file(:remoterpc_cache, file: data_dir("remoterpc.cache"))
+    cache = DetsPlus.LRU.new(cache, 1000, fn value -> value != nil end)
+
+    if NodeAgent.available?() do
+      NodeAgent.stop()
+    end
+
+    RemoteChain.RPCCache.set_optimistic_caching(false)
+
     base_children = [
       worker(Stats, []),
+      worker(MerkleCache, []),
       supervisor(Model.Sql),
-      supervisor(Channels),
-      supervisor(Moonbeam.Sup),
       worker(Chain.BlockCache, [ets_extra]),
       worker(Chain, [ets_extra]),
       worker(PubSub, [args]),
-      worker(Chain.Pool, [args]),
-      worker(TicketStore, [ets_extra])
+      worker(Chain.Pool, [args])
+      | Enum.map(RemoteChain.chains(), fn chain ->
+          supervisor(RemoteChain.Sup, [chain, [cache: cache]], {RemoteChain.Sup, chain})
+        end)
     ]
 
     children =
-      if Mix.env() == :benchmark do
+      if Mix.env() == :benchmark or get_env("OFFLINE") do
         base_children
       else
         network_children = [
@@ -105,7 +97,6 @@ defmodule Diode do
         base_children ++ network_children
       end
 
-    children = children ++ [worker(Chain.Worker, [worker_mode()])]
     Supervisor.start_link(children, strategy: :rest_for_one, name: Diode.Supervisor)
   end
 
@@ -113,21 +104,27 @@ defmodule Diode do
   def start_client_network() do
     rpc_api(:http, port: rpc_port())
 
-    if not dev_mode?() do
-      ssl_rpc_api()
+    if NodeAgent.available?() do
+      start_child!(worker(NodeAgent, []))
     end
 
-    Supervisor.start_child(Diode.Supervisor, Network.Server.child(edge2_ports(), Network.EdgeV2))
-    |> case do
-      {:error, :already} -> Supervisor.restart_child(Diode.Supervisor, Network.EdgeV2)
-      other -> other
+    start_child!(worker(BridgeMonitor, [[]]))
+    start_child!(worker(Chain.Worker, [worker_mode()]))
+  end
+
+  defp start_child!(what) do
+    case Supervisor.start_child(Diode.Supervisor, what) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
     end
   end
 
   def stop_client_network() do
     Plug.Cowboy.shutdown(Network.RpcHttp.HTTP)
-    Plug.Cowboy.shutdown(Network.RpcHttp.HTTPS)
-    Supervisor.terminate_child(Diode.Supervisor, Network.EdgeV2)
+
+    if NodeAgent.available?() do
+      Supervisor.terminate_child(Diode.Supervisor, NodeAgent)
+    end
   end
 
   defp set_chaindefinition() do
@@ -151,9 +148,9 @@ defmodule Diode do
     %{id: module, start: {Diode, :start_worker, [module, args]}}
   end
 
-  defp supervisor(module, args \\ []) do
+  defp supervisor(module, args \\ [], id \\ nil) do
     %{
-      id: module,
+      id: id || module,
       start: {Diode, :start_worker, [module, args]},
       shutdown: :infinity,
       type: :supervisor
@@ -161,10 +158,23 @@ defmodule Diode do
   end
 
   def start_worker(module, args) do
-    puts("Starting #{module}...")
-    {t, ret} = :timer.tc(module, :start_link, args)
-    puts("=======> #{module} loaded after #{Float.round(t / 1_000_000, 3)}s")
-    ret
+    puts("Starting #{module}/#{length(args)}...")
+
+    try do
+      case :timer.tc(module, :start_link, args) do
+        {t, {:ok, pid}} ->
+          puts("=======> #{module} loaded after #{Float.round(t / 1_000_000, 3)}s")
+          {:ok, pid}
+
+        {_t, other} ->
+          puts("=======> #{module} failed with: #{inspect(other)}")
+          other
+      end
+    catch
+      type, other ->
+        puts("=======> #{module} failed with: #{inspect({type, other})}")
+        reraise(other, __STACKTRACE__)
+    end
   end
 
   def start_subwork(label, fun) do
@@ -205,18 +215,6 @@ defmodule Diode do
     end
   end
 
-  defp ssl_rpc_api() do
-    if ssl?() do
-      rpc_api(:https,
-        keyfile: "priv/privkey.pem",
-        certfile: "priv/cert.pem",
-        cacertfile: "priv/fullchain.pem",
-        port: rpcs_port(),
-        otp_app: Diode
-      )
-    end
-  end
-
   @spec env :: :prod | :test | :dev
   def env() do
     :persistent_term.get(:env)
@@ -237,13 +235,6 @@ defmodule Diode do
     env() == :dev or env() == :test
   end
 
-  def travis_mode?() do
-    case System.get_env("TRAVIS", nil) do
-      nil -> false
-      _ -> true
-    end
-  end
-
   @spec test_mode? :: boolean
   def test_mode?() do
     env() == :test
@@ -259,15 +250,6 @@ defmodule Diode do
     :persistent_term.put(:trace, enabled)
   end
 
-  @doc "Number of bytes the server is willing to send without payment yet."
-  def ticket_grace() do
-    :persistent_term.get(:ticket_grace, 1024 * 40_960)
-  end
-
-  def ticket_grace(bytes) when is_integer(bytes) do
-    :persistent_term.put(:ticket_grace, bytes)
-  end
-
   @spec hash(binary()) :: binary()
   def hash(bin) do
     # Ethereum is using KEC instead ...
@@ -277,6 +259,14 @@ defmodule Diode do
   @spec miner() :: Wallet.t()
   def miner() do
     Model.CredSql.wallet()
+  end
+
+  def wallet() do
+    miner()
+  end
+
+  def address() do
+    wallet() |> Wallet.address!()
   end
 
   def syncing?() do
@@ -334,7 +324,7 @@ defmodule Diode do
 
   @spec rpc_port() :: integer()
   def rpc_port() do
-    get_env_int("RPC_PORT", 8545)
+    get_env_int("RPC_PORT", 3834)
   end
 
   def rpcs_port() do
@@ -382,6 +372,10 @@ defmodule Diode do
     end
   end
 
+  def worker_log?() do
+    get_env("WORKER_LOG", "false") == "true"
+  end
+
   @spec memory_mode() :: :normal | :minimal
   def memory_mode() do
     case get_env("MEMORY_MODE", "normal") do
@@ -401,7 +395,7 @@ defmodule Diode do
 
   def self(hostname) do
     Object.Server.new(hostname, hd(edge2_ports()), peer_port(), version(), [
-      ["tickets", TicketStore.value(Chain.epoch())],
+      ["tickets", 0],
       ["uptime", Diode.uptime()],
       ["block", Chain.peak()]
     ])

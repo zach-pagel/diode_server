@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Object do
   @moduledoc """
@@ -74,9 +74,17 @@ defmodule Object do
     [extname(type) | values]
   end
 
-  @spec key(tuple()) :: binary()
   def key(record) do
-    modname(record).key(record)
+    if function_exported?(modname(record), :key, 1) do
+      modname(record).key(record)
+    end
+  end
+
+  def key_hash(record) do
+    case key(record) do
+      nil -> nil
+      hkey -> Kademlia.hash(hkey)
+    end
   end
 
   @spec block_number(tuple()) :: integer()

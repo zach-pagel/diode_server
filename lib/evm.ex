@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Evm do
   @moduledoc """
@@ -87,14 +87,23 @@ defmodule Evm do
           do_create(to_address, value, call_data, gas, task)
 
         :evmc_callcode ->
-          do_call_contract(address(task), target, gas, value, call_data, address(task), task)
+          do_call_contract(
+            address(task),
+            target,
+            gas,
+            value,
+            call_data,
+            address(task),
+            task,
+            kind
+          )
 
         :evmc_delegatecall ->
           sender = <<task.from::unsigned-size(160)>>
-          do_call_contract(address(task), target, gas, value, call_data, sender, task)
+          do_call_contract(address(task), target, gas, value, call_data, sender, task, kind)
 
         :evmc_call ->
-          do_call_contract(target, target, gas, value, call_data, address(task), task)
+          do_call_contract(target, target, gas, value, call_data, address(task), task, kind)
       end
     end
 
@@ -105,7 +114,8 @@ defmodule Evm do
            value,
            call_data,
            from,
-           %Task{chain_state: state} = task
+           %Task{chain_state: state, number: number} = task,
+           kind
          ) do
       code = State.ensure_account(state, code).code
 
@@ -118,7 +128,8 @@ defmodule Evm do
       }
 
       state =
-        if value == 0 or from == tx.to do
+        if value == 0 or from == tx.to or
+             (kind == :evmc_delegatecall and not ChainDefinition.double_spend_delegatecall(number)) do
           state
         else
           from_acc = State.account(state, from)
@@ -508,7 +519,7 @@ defmodule Evm do
         id = "process_#{binary_part(data, 0, 2)}"
         loop(Stats.tc(id, fn -> process_data(data, evm) end))
 
-      {'EXIT', _port, _reason} ->
+      {~c"EXIT", _port, _reason} ->
         throw({:evm_crash, evm, 0})
     after
       @timeout ->
@@ -675,7 +686,7 @@ defmodule Evm do
         {_port, {:data, <<"su", rest::binary>>}} ->
           process_updates(rest, state(evm))
 
-        {'EXIT', _port, _reason} ->
+        {~c"EXIT", _port, _reason} ->
           throw({:evm_crash, evm, 0})
       after
         @timeout ->

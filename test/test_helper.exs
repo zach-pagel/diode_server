@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 import While
 
@@ -19,7 +19,6 @@ defmodule TestHelper do
     kill_clones()
     Chain.Pool.flush()
     Chain.reset_state()
-    TicketStore.clear()
     Kademlia.reset()
     wait(0)
     Supervisor.restart_child(Diode.Supervisor, Chain.Worker)

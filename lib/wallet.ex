@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Wallet do
   @moduledoc """
@@ -17,7 +17,11 @@ defmodule Wallet do
   Record.defrecord(:wallet, privkey: nil, pubkey: nil, address: nil)
 
   @type t ::
-          record(:wallet, privkey: nil | <<_::256>>, pubkey: nil | <<_::264>>, address: <<_::160>>)
+          record(:wallet,
+            privkey: nil | <<_::256>>,
+            pubkey: nil | <<_::264>>,
+            address: <<_::160>>
+          )
 
   @spec new :: Wallet.t()
   def new() do

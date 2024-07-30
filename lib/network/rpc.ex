@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Network.Rpc do
   alias Chain.BlockCache, as: Block
@@ -70,10 +70,6 @@ defmodule Network.Rpc do
 
     if Diode.dev_mode?() do
       :io.format("~s = ~p~n", [method, result])
-
-      # if error != nil or (is_map(result) and Map.has_key?(result, "error")) do
-      #   :io.format("params: ~p~n", [params])
-      # end
     end
 
     {ret, code} =
@@ -279,6 +275,7 @@ defmodule Network.Rpc do
         opts =
           Map.put_new(opts, "gas", Base16.encode(Chain.gas_limit(), false))
           |> Map.put_new("gasPrice", "0x0")
+          |> Map.put("blockRef", ref)
           |> decode_opts()
 
         data = opts["data"]
@@ -569,6 +566,14 @@ defmodule Network.Rpc do
           |> result()
         end)
 
+      "dio_edgev2" ->
+        msg = hd(params) |> Base16.decode() |> Rlp.decode!()
+
+        Network.EdgeV2.handle_rpc(msg)
+        |> Rlp.encode!()
+        |> Base16.encode()
+        |> result()
+
       _ ->
         nil
     end
@@ -723,6 +728,7 @@ defmodule Network.Rpc do
       value =
         case {key, value} do
           {_key, nil} -> nil
+          {_key, list} when is_list(list) -> nil
           {"to", _value} -> Base16.decode(value)
           {"from", _value} -> Base16.decode(value)
           {"data", _value} -> Base16.decode(value)

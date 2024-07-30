@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Model.ChainSql do
   alias Model.{Ets, Sql, ChainSql.Writer}
@@ -25,7 +25,12 @@ defmodule Model.ChainSql do
     end
 
     def submit_block_number(block_ref) do
-      GenServer.cast(__MODULE__, {:submit, {:num, block_ref}})
+      cast({:submit, {:num, block_ref}})
+    end
+
+    def cast(cmd) do
+      Process.whereis(__MODULE__) || raise "Writer not started"
+      GenServer.cast(__MODULE__, cmd)
     end
 
     def submit_new_block(block) do
@@ -45,7 +50,7 @@ defmodule Model.ChainSql do
             end
           end)
 
-        GenServer.cast(__MODULE__, {:submit, {:task, Block.hash(block), task}})
+        cast({:submit, {:task, Block.hash(block), task}})
       end
     end
 
@@ -83,7 +88,7 @@ defmodule Model.ChainSql do
       # ensuring after a writer crash that all pending blocks are still
       # written
       for hash <- Ets.keys(__MODULE__) do
-        GenServer.cast(__MODULE__, {:submit, {:hash, hash}})
+        GenServer.cast(self(), {:submit, {:hash, hash}})
       end
 
       {:ok, db} = Sql.start_database(Db.Default)
@@ -542,13 +547,15 @@ defmodule Model.ChainSql do
   end
 
   def alt_blocks() do
-    Sql.query!(__MODULE__, "SELECT data FROM blocks WHERE number IS NULL", call_timeout: @infinity)
+    Sql.query!(__MODULE__, "SELECT data FROM blocks WHERE number IS NULL",
+      call_timeout: @infinity
+    )
     |> Enum.map(fn [data: data] -> BertInt.decode!(data) end)
   end
 
   def clear_alt_blocks() do
-    # Sql.query!(__MODULE__, "DELETE FROM blocks WHERE number IS NULL", call_timeout: @infinity)
-    # Sql.query!(__MODULE__, "PRAGMA OPTIMIZE", call_timeout: @infinity)
+    Sql.query!(__MODULE__, "DELETE FROM blocks WHERE number IS NULL", call_timeout: @infinity)
+    Sql.query!(__MODULE__, "PRAGMA OPTIMIZE", call_timeout: @infinity)
     :ok
   end
 

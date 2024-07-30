@@ -1,11 +1,12 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule Network.RpcWs do
   @behaviour :cowboy_websocket
+  require Logger
 
   def init(req, state) do
-    {:cowboy_websocket, req, state}
+    {:cowboy_websocket, req, state, %{compress: true, idle_timeout: 60 * 60_000}}
   end
 
   def websocket_init(state) do
@@ -27,8 +28,25 @@ defmodule Network.RpcWs do
 
   def websocket_handle({:text, message}, state) do
     with {:ok, message} <- Poison.decode(message) do
-      {_status, response} = Network.Rpc.handle_jsonrpc(message, extra: {__MODULE__, :execute_rpc})
-      {:reply, {:text, Poison.encode!(response)}, state}
+      case message do
+        %{"method" => method} when method in ["eth_subscribe", "eth_unsubscribe"] ->
+          {_status, response} =
+            Network.Rpc.handle_jsonrpc(message, extra: {__MODULE__, :execute_rpc})
+
+          {:reply, {:text, Poison.encode!(response)}, state}
+
+        _other ->
+          pid = self()
+
+          spawn_link(fn ->
+            {_status, response} =
+              Network.Rpc.handle_jsonrpc(message, extra: {__MODULE__, :execute_rpc})
+
+            send(pid, {:reply, {:text, Poison.encode!(response)}})
+          end)
+
+          {:ok, state}
+      end
     else
       {:ok, state} ->
         {:ok, state}
@@ -81,6 +99,10 @@ defmodule Network.RpcWs do
     :ok
   end
 
+  def websocket_info({:reply, reply}, state) do
+    {:reply, reply, state}
+  end
+
   def websocket_info(any, state) do
     case any do
       {:rpc, :block, block_hash} ->
@@ -99,7 +121,7 @@ defmodule Network.RpcWs do
                "method" => "eth_subscription",
                "params" => %{
                  "subscription" => id,
-                 "result" => Json.prepare!(block)
+                 "result" => Json.prepare!(block, big_x: false)
                }
              })}
           end)
@@ -147,7 +169,7 @@ defmodule Network.RpcWs do
         {:ok, state}
 
       _ ->
-        :io.format("rpc_ws:websocket_info(~p)~n", [any])
+        Logger.info("rpc_ws:websocket_info(#{inspect(any)})", [any])
         {:ok, state}
     end
   end

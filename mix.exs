@@ -1,11 +1,17 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
+
+if String.to_integer(System.otp_release()) < 25 do
+  IO.puts("this package requires OTP 25.")
+  raise "incorrect OTP"
+end
+
 defmodule Diode.Mixfile do
   use Mix.Project
 
-  @vsn "1.1.0"
-  @full_vsn "v1.1.0"
+  @vsn "1.5.1"
+  @full_vsn "v1.5.1"
   @url "https://github.com/diodechain/diode_server"
 
   def project do
@@ -84,20 +90,23 @@ defmodule Diode.Mixfile do
 
   defp deps do
     [
+      {:dets_plus, "~> 2.0"},
       {:benchee, "~> 1.0", only: :benchmark},
       {:debouncer, "~> 0.1"},
+      {:eblake2, "~> 1.0"},
       {:elixir_make, "~> 0.4", runtime: false},
       {:ex_doc, "~> 0.28", only: :dev, runtime: false},
+      {:httpoison, "~> 2.0"},
       {:keccakf1600, github: "diodechain/erlang-keccakf1600"},
       {:libsecp256k1, github: "diodechain/libsecp256k1"},
+      {:niffler, "~> 0.1"},
+      {:oncrash, "~> 0.0"},
       {:plug_cowboy, "~> 2.5"},
-      {:poison, "~> 3.0"},
+      {:poison, "~> 4.0"},
       {:profiler, github: "dominicletz/profiler"},
       {:sqlitex, github: "diodechain/sqlitex"},
-      {:niffler, "~> 0.1"},
+      {:websockex, github: "Azolo/websockex"},
       {:while, "~> 0.2"},
-      {:httpoison, "~> 2.0"},
-      {:oncrash, "~> 0.0"},
 
       # linting
       {:dialyxir, "~> 1.1", only: [:dev], runtime: false},

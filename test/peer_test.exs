@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2021 Diode
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule PeerTest do
   use ExUnit.Case, async: false
@@ -62,8 +62,8 @@ defmodule PeerTest do
     {:ok, {_head, _opt, body}} =
       :httpc.request(
         :post,
-        {'http://localhost:#{rpc_port(num)}', [], 'application/json',
-         '{"id":1, "method":"#{method}", "params":[#{params}]}'},
+        {~c"http://localhost:#{rpc_port(num)}", [], ~c"application/json",
+         ~c"{\"id\":1, \"method\":\"#{method}\", \"params\":[#{params}]}"},
         [timeout: 5000],
         []
       )

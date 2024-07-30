@@ -1,24 +1,29 @@
 # Diode Server
-# Copyright 2020 Diode (IBTC)
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule ChainDefinition.Stagenet do
-  alias ChainDefinition.{Voyager, Pioneer}
+  alias ChainDefinition.{Ulysses, Voyager, Pioneer}
   @voyager 10
   @voyager_t1 @voyager - 1
   @pioneer 20
   @pioneer_t1 @pioneer - 1
   @new_horizons 20
+  @ulysses 30
+  @ulysses_t1 @ulysses - 1
+  @ulysses2 40
 
   @spec network(any) :: ChainDefinition.t()
-  def network(blockheight) when blockheight < @voyager do
+  def network(blockheight) when blockheight >= @ulysses2 do
     %ChainDefinition{
-      block_reward_position: :first,
-      chain_id: 41042,
-      check_window: false,
-      get_block_hash_limit: 131_072,
-      min_diversity: 0,
-      min_transaction_fee: false,
-      allow_contract_override: true
+      network(@ulysses2 - 1)
+      | double_spend_delegatecall: false
+    }
+  end
+
+  def network(blockheight) when blockheight >= @new_horizons do
+    %ChainDefinition{
+      network(@new_horizons - 1)
+      | allow_contract_override: false
     }
   end
 
@@ -31,15 +36,25 @@ defmodule ChainDefinition.Stagenet do
     }
   end
 
-  def network(blockheight) when blockheight >= @new_horizons do
+  def network(blockheight) when blockheight < @voyager do
     %ChainDefinition{
-      network(@new_horizons - 1)
-      | allow_contract_override: false
+      block_reward_position: :first,
+      chain_id: 41042,
+      check_window: false,
+      get_block_hash_limit: 131_072,
+      min_diversity: 0,
+      min_transaction_fee: false,
+      allow_contract_override: true,
+      double_spend_delegatecall: true
     }
   end
 
   def hardforks(block) do
     case Chain.Block.number(block) do
+      @ulysses_t1 ->
+        state = Ulysses.apply(Chain.Block.state(block))
+        Chain.Block.ensure_state(block, state)
+
       @voyager_t1 ->
         state = Voyager.apply(Chain.Block.state(block))
         Chain.Block.ensure_state(block, state)

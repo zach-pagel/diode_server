@@ -1,5 +1,5 @@
 # Diode Server
-# Copyright 2020 Diode (IBTC)
+# Copyright 2021-2024 Diode
 # Licensed under the Diode License, Version 1.1
 defmodule ChainDefinition.Devnet do
   alias Chain.Account, as: Account
@@ -12,7 +12,8 @@ defmodule ChainDefinition.Devnet do
       get_block_hash_limit: 131_072,
       min_diversity: 0,
       min_transaction_fee: true,
-      allow_contract_override: false
+      allow_contract_override: false,
+      double_spend_delegatecall: false
     }
   end
 
